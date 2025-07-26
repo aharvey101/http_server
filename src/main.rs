@@ -1,4 +1,5 @@
 mod server;
+mod tests;
 
 use server::HttpServer;
 

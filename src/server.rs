@@ -63,6 +63,62 @@ impl HttpRequest {
     }
 }
 
+#[derive(Debug)]
+pub struct HttpResponse {
+    pub status_code: u16,
+    pub status_text: String,
+    pub headers: HashMap<String, String>,
+    pub body: String,
+}
+
+impl HttpResponse {
+    pub fn new(status_code: u16, status_text: &str) -> Self {
+        HttpResponse {
+            status_code,
+            status_text: status_text.to_string(),
+            headers: HashMap::new(),
+            body: String::new(),
+        }
+    }
+
+    pub fn with_body(mut self, body: &str) -> Self {
+        self.body = body.to_string();
+        // Automatically set Content-Length header
+        self.headers.insert("Content-Length".to_string(), body.len().to_string());
+        self
+    }
+
+    pub fn with_header(mut self, key: &str, value: &str) -> Self {
+        self.headers.insert(key.to_string(), value.to_string());
+        self
+    }
+
+    pub fn with_content_type(self, content_type: &str) -> Self {
+        self.with_header("Content-Type", content_type)
+    }
+
+    // Format response with proper HTTP/1.1 format and \r\n line endings
+    pub fn format(&self) -> String {
+        let mut response = String::new();
+        
+        // Status line generation (HTTP/1.1 200 OK)
+        response.push_str(&format!("HTTP/1.1 {} {}\r\n", self.status_code, self.status_text));
+        
+        // Add required headers with proper formatting
+        for (key, value) in &self.headers {
+            response.push_str(&format!("{}: {}\r\n", key, value));
+        }
+        
+        // Ensure proper \r\n line endings - empty line between headers and body
+        response.push_str("\r\n");
+        
+        // Format response body
+        response.push_str(&self.body);
+        
+        response
+    }
+}
+
 pub struct HttpServer {
     listener: TcpListener,
 }
@@ -117,16 +173,23 @@ impl HttpServer {
                             "POST" => self.handle_post_request(&request),
                             "PUT" => self.handle_put_request(&request),
                             "DELETE" => self.handle_delete_request(&request),
-                            _ => "HTTP/1.1 405 Method Not Allowed\r\n\r\nMethod not supported".to_string(),
+                            _ => HttpResponse::new(405, "Method Not Allowed")
+                                .with_content_type("text/plain")
+                                .with_body("Method not supported"),
                         };
                         
-                        stream.write(response.as_bytes()).unwrap();
+                        let formatted_response = response.format();
+                        stream.write(formatted_response.as_bytes()).unwrap();
                         stream.flush().unwrap();
                     }
                     Err(e) => {
                         println!("Error parsing HTTP request: {}", e);
-                        let response = "HTTP/1.1 400 Bad Request\r\n\r\nMalformed request";
-                        stream.write(response.as_bytes()).unwrap();
+                        let response = HttpResponse::new(400, "Bad Request")
+                            .with_content_type("text/plain")
+                            .with_body("Malformed request");
+                        
+                        let formatted_response = response.format();
+                        stream.write(formatted_response.as_bytes()).unwrap();
                         stream.flush().unwrap();
                     }
                 }
@@ -137,19 +200,27 @@ impl HttpServer {
         }
     }
 
-    fn handle_get_request(&self, request: &HttpRequest) -> String {
-        format!("HTTP/1.1 200 OK\r\n\r\nGET request to path: {}", request.path)
+    fn handle_get_request(&self, request: &HttpRequest) -> HttpResponse {
+        HttpResponse::new(200, "OK")
+            .with_content_type("text/plain")
+            .with_body(&format!("GET request to path: {}", request.path))
     }
 
-    fn handle_post_request(&self, request: &HttpRequest) -> String {
-        format!("HTTP/1.1 200 OK\r\n\r\nPOST request to path: {} with body: {}", request.path, request.body)
+    fn handle_post_request(&self, request: &HttpRequest) -> HttpResponse {
+        HttpResponse::new(200, "OK")
+            .with_content_type("text/plain")
+            .with_body(&format!("POST request to path: {} with body: {}", request.path, request.body))
     }
 
-    fn handle_put_request(&self, request: &HttpRequest) -> String {
-        format!("HTTP/1.1 200 OK\r\n\r\nPUT request to path: {} with body: {}", request.path, request.body)
+    fn handle_put_request(&self, request: &HttpRequest) -> HttpResponse {
+        HttpResponse::new(200, "OK")
+            .with_content_type("text/plain")
+            .with_body(&format!("PUT request to path: {} with body: {}", request.path, request.body))
     }
 
-    fn handle_delete_request(&self, request: &HttpRequest) -> String {
-        format!("HTTP/1.1 200 OK\r\n\r\nDELETE request to path: {}", request.path)
+    fn handle_delete_request(&self, request: &HttpRequest) -> HttpResponse {
+        HttpResponse::new(200, "OK")
+            .with_content_type("text/plain")
+            .with_body(&format!("DELETE request to path: {}", request.path))
     }
 }
