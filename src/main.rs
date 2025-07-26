@@ -1,3 +1,4 @@
+mod http_lib;
 mod server;
 #[cfg(test)]
 mod tests;
