@@ -6,6 +6,46 @@ use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::io::{self, ErrorKind};
 
+// Simple base64 decoder for authentication (simplified implementation)
+fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = Vec::new();
+    let input = input.trim();
+    
+    if input.len() % 4 != 0 {
+        return Err("Invalid base64 length");
+    }
+    
+    for chunk in input.as_bytes().chunks(4) {
+        let mut values = [0u8; 4];
+        
+        for (i, &byte) in chunk.iter().enumerate() {
+            if byte == b'=' {
+                values[i] = 0;
+            } else if let Some(pos) = CHARS.iter().position(|&c| c == byte) {
+                values[i] = pos as u8;
+            } else {
+                return Err("Invalid base64 character");
+            }
+        }
+        
+        let combined = ((values[0] as u32) << 18) | 
+                      ((values[1] as u32) << 12) | 
+                      ((values[2] as u32) << 6) | 
+                      (values[3] as u32);
+        
+        result.push((combined >> 16) as u8);
+        if chunk[2] != b'=' {
+            result.push((combined >> 8) as u8);
+        }
+        if chunk[3] != b'=' {
+            result.push(combined as u8);
+        }
+    }
+    
+    Ok(result)
+}
+
 // Custom error types for better error handling
 #[derive(Debug)]
 pub enum ServerError {
@@ -163,6 +203,14 @@ impl HttpResponse {
         self.with_header("Content-Type", content_type)
     }
 
+    pub fn with_chunked_encoding(self) -> Self {
+        self.with_header("Transfer-Encoding", "chunked")
+    }
+
+    pub fn with_connection(self, connection_type: &str) -> Self {
+        self.with_header("Connection", connection_type)
+    }
+
     // Format response with proper HTTP/1.1 format and \r\n line endings
     pub fn format(&self) -> String {
         let mut response = String::new();
@@ -183,6 +231,40 @@ impl HttpResponse {
         
         response
     }
+
+    // Format response with chunked transfer encoding
+    pub fn format_chunked(&self) -> String {
+        let mut response = String::new();
+        
+        // Status line generation (HTTP/1.1 200 OK)
+        response.push_str(&format!("HTTP/1.1 {} {}\r\n", self.status_code, self.status_text));
+        
+        // Add required headers with proper formatting (excluding Content-Length for chunked)
+        for (key, value) in &self.headers {
+            if key.to_lowercase() != "content-length" && key.to_lowercase() != "transfer-encoding" {
+                response.push_str(&format!("{}: {}\r\n", key, value));
+            }
+        }
+        
+        // Add Transfer-Encoding: chunked header
+        response.push_str("Transfer-Encoding: chunked\r\n");
+        
+        // Ensure proper \r\n line endings - empty line between headers and body
+        response.push_str("\r\n");
+        
+        // Format body as chunks
+        if !self.body.is_empty() {
+            let body_bytes = self.body.as_bytes();
+            response.push_str(&format!("{:X}\r\n", body_bytes.len()));
+            response.push_str(&self.body);
+            response.push_str("\r\n");
+        }
+        
+        // End chunk marker
+        response.push_str("0\r\n\r\n");
+        
+        response
+    }
 }
 
 #[derive(Debug)]
@@ -195,6 +277,8 @@ pub struct Route {
 pub struct Router {
     routes: Vec<Route>,
     static_dir: Option<String>,
+    auth_users: HashMap<String, String>, // username -> password
+    protected_paths: Vec<String>,
 }
 
 impl Router {
@@ -202,6 +286,8 @@ impl Router {
         Router {
             routes: Vec::new(),
             static_dir: None,
+            auth_users: HashMap::new(),
+            protected_paths: Vec::new(),
         }
     }
 
@@ -217,6 +303,42 @@ impl Router {
         self.static_dir = Some(dir.to_string());
     }
 
+    pub fn add_auth_user(&mut self, username: &str, password: &str) {
+        self.auth_users.insert(username.to_string(), password.to_string());
+    }
+
+    pub fn add_protected_path(&mut self, path: &str) {
+        self.protected_paths.push(path.to_string());
+    }
+
+    // Basic HTTP Authentication helper
+    fn authenticate(&self, request: &HttpRequest) -> bool {
+        if let Some(auth_header) = request.headers.get("authorization") {
+            if auth_header.starts_with("Basic ") {
+                let encoded = &auth_header[6..]; // Skip "Basic "
+                
+                // Decode base64 credentials (simplified implementation)
+                if let Ok(decoded_bytes) = base64_decode(encoded) {
+                    if let Ok(decoded) = String::from_utf8(decoded_bytes) {
+                        if let Some(colon_pos) = decoded.find(':') {
+                            let username = &decoded[..colon_pos];
+                            let password = &decoded[colon_pos + 1..];
+                            
+                            return self.auth_users.get(username)
+                                .map(|stored_password| stored_password == password)
+                                .unwrap_or(false);
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn is_protected_path(&self, path: &str) -> bool {
+        self.protected_paths.iter().any(|protected| path.starts_with(protected))
+    }
+
     // Create route matching logic
     pub fn route(&self, request: &HttpRequest) -> HttpResponse {
         // Extract path without query parameters for routing
@@ -226,14 +348,36 @@ impl Router {
             &request.path
         };
 
-        // Handle different URL paths - exact match first
+        // Check if path requires authentication
+        if self.is_protected_path(path_without_query) {
+            if !self.authenticate(request) {
+                return HttpResponse::new(401, "Unauthorized")
+                    .with_content_type("text/html")
+                    .with_header("WWW-Authenticate", "Basic realm=\"Protected Area\"")
+                    .with_body("<h1>401 - Unauthorized</h1><p>Authentication required to access this resource.</p>");
+            }
+        }
+
+        // Handle static file serving first for any path starting with static directory
+        if request.method == "GET" && self.static_dir.is_some() {
+            if let Some(static_dir) = &self.static_dir {
+                // Check if path starts with static directory or is accessing static content
+                if path_without_query.starts_with(&format!("/{}/", static_dir)) || path_without_query == format!("/{}", static_dir) {
+                    if let Some(response) = self.serve_static_file(path_without_query) {
+                        return response;
+                    }
+                }
+            }
+        }
+
+        // Handle different URL paths - exact match
         for route in &self.routes {
             if route.method == request.method && route.path == path_without_query {
                 return (route.handler)(request);
             }
         }
 
-        // Handle static file serving
+        // Handle static file serving for root and other paths
         if request.method == "GET" && self.static_dir.is_some() {
             if let Some(response) = self.serve_static_file(path_without_query) {
                 return response;
@@ -246,11 +390,17 @@ impl Router {
             .with_body("<h1>404 - Page Not Found</h1><p>The requested resource could not be found.</p>")
     }
 
-    // Handle static file serving with enhanced error handling
+    // Handle static file serving with enhanced error handling and directory listing
     fn serve_static_file(&self, path: &str) -> Option<HttpResponse> {
         if let Some(static_dir) = &self.static_dir {
             let file_path = if path == "/" {
                 format!("{}/index.html", static_dir)
+            } else if path == format!("/{}", static_dir) || path == format!("/{}/", static_dir) {
+                // Handle requests to the static directory itself
+                static_dir.to_string()
+            } else if path.starts_with(&format!("/{}/", static_dir)) {
+                // Handle requests to files/directories within static directory
+                format!("{}{}", static_dir, &path[static_dir.len() + 1..])
             } else {
                 format!("{}{}", static_dir, path)
             };
@@ -264,7 +414,15 @@ impl Router {
                 );
             }
 
-            if Path::new(&file_path).exists() {
+            let path_obj = Path::new(&file_path);
+            
+            if path_obj.exists() {
+                // If it's a directory, serve directory listing
+                if path_obj.is_dir() {
+                    return self.serve_directory_listing(&file_path, path);
+                }
+                
+                // If it's a file, serve the file content
                 match fs::read_to_string(&file_path) {
                     Ok(content) => {
                         let content_type = self.get_content_type(&file_path);
@@ -287,6 +445,99 @@ impl Router {
             }
         }
         None
+    }
+
+    // Add directory listing functionality
+    fn serve_directory_listing(&self, dir_path: &str, request_path: &str) -> Option<HttpResponse> {
+        match fs::read_dir(dir_path) {
+            Ok(entries) => {
+                let mut html = String::from("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
+                html.push_str("<meta charset=\"UTF-8\">\n");
+                html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
+                html.push_str(&format!("<title>Directory Listing: {}</title>\n", request_path));
+                html.push_str("<style>\n");
+                html.push_str("body { font-family: Arial, sans-serif; margin: 40px; }\n");
+                html.push_str("h1 { color: #d73502; }\n");
+                html.push_str("ul { list-style-type: none; padding: 0; }\n");
+                html.push_str("li { margin: 5px 0; }\n");
+                html.push_str("a { text-decoration: none; color: #0066cc; }\n");
+                html.push_str("a:hover { text-decoration: underline; }\n");
+                html.push_str(".directory { font-weight: bold; }\n");
+                html.push_str(".file { color: #333; }\n");
+                html.push_str("</style>\n");
+                html.push_str("</head>\n<body>\n");
+                html.push_str(&format!("<h1>📁 Directory Listing: {}</h1>\n", request_path));
+                
+                // Add navigation back to parent directory if not at root
+                if request_path != "/" && request_path != "" {
+                    let parent_path = if request_path.ends_with('/') {
+                        &request_path[..request_path.len()-1]
+                    } else {
+                        request_path
+                    };
+                    
+                    if let Some(last_slash) = parent_path.rfind('/') {
+                        let parent = if last_slash == 0 { "/" } else { &parent_path[..last_slash] };
+                        html.push_str(&format!("<p><a href=\"{}\" class=\"directory\">⬆️ Parent Directory</a></p>\n", parent));
+                    }
+                }
+                
+                html.push_str("<ul>\n");
+                
+                // Collect and sort directory entries
+                let mut entries_vec: Vec<_> = entries.filter_map(|entry| entry.ok()).collect();
+                entries_vec.sort_by(|a, b| {
+                    // Sort directories first, then files, both alphabetically
+                    let a_is_dir = a.path().is_dir();
+                    let b_is_dir = b.path().is_dir();
+                    
+                    match (a_is_dir, b_is_dir) {
+                        (true, false) => std::cmp::Ordering::Less,
+                        (false, true) => std::cmp::Ordering::Greater,
+                        _ => a.file_name().cmp(&b.file_name()),
+                    }
+                });
+                
+                for entry in entries_vec {
+                    if let Some(name) = entry.file_name().to_str() {
+                        let is_dir = entry.path().is_dir();
+                        let link_path = if request_path.ends_with('/') {
+                            format!("{}{}", request_path, name)
+                        } else {
+                            format!("{}/{}", request_path, name)
+                        };
+                        
+                        let icon = if is_dir { "📁" } else { "📄" };
+                        let class = if is_dir { "directory" } else { "file" };
+                        let suffix = if is_dir { "/" } else { "" };
+                        
+                        html.push_str(&format!(
+                            "<li><a href=\"{}{}\" class=\"{}\">{} {}{}</a></li>\n",
+                            link_path, suffix, class, icon, name, suffix
+                        ));
+                    }
+                }
+                
+                html.push_str("</ul>\n");
+                html.push_str("<hr>\n");
+                html.push_str("<p><em>Generated by Rust HTTP Server</em></p>\n");
+                html.push_str("</body>\n</html>");
+                
+                Some(
+                    HttpResponse::new(200, "OK")
+                        .with_content_type("text/html")
+                        .with_body(&html)
+                )
+            }
+            Err(e) => {
+                eprintln!("Directory read error for {}: {}", dir_path, e);
+                Some(
+                    HttpResponse::new(500, "Internal Server Error")
+                        .with_content_type("text/html")
+                        .with_body("<h1>500 - Internal Server Error</h1><p>Unable to read directory contents.</p>")
+                )
+            }
+        }
     }
 
     // Handle different MIME types
@@ -342,6 +593,8 @@ impl HttpServer {
         router.add_route("GET", "/hello", Self::handle_hello);
         router.add_route("GET", "/api/status", Self::handle_status);
         router.add_route("POST", "/api/echo", Self::handle_echo);
+        router.add_route("GET", "/admin", Self::handle_admin);
+        router.add_route("GET", "/chunked", Self::handle_chunked_demo);
         
         Ok(HttpServer { listener, router, logger })
     }
@@ -352,6 +605,14 @@ impl HttpServer {
 
     pub fn set_static_dir(&mut self, dir: &str) {
         self.router.set_static_dir(dir);
+    }
+
+    pub fn add_auth_user(&mut self, username: &str, password: &str) {
+        self.router.add_auth_user(username, password);
+    }
+
+    pub fn add_protected_path(&mut self, path: &str) {
+        self.router.add_protected_path(path);
     }
 
     pub fn start(&self) -> Result<(), ServerError> {
@@ -401,75 +662,124 @@ impl HttpServer {
         Ok(())
     }
 
-    // Enhanced connection handling with comprehensive error handling
+    // Enhanced connection handling with comprehensive error handling and HTTP keep-alive support
     fn handle_connection_safe(&self, mut stream: TcpStream, client_addr: &str) -> Result<(), ServerError> {
-        // Read incoming data from TCP stream with proper error handling
-        let mut buffer = [0; 1024];
-        
-        let bytes_read = match stream.read(&mut buffer) {
-            Ok(0) => {
-                self.logger.log_warning(&format!("Client {} closed connection immediately", client_addr));
-                return Ok(());
-            }
-            Ok(bytes) => {
-                self.logger.log_info(&format!("Received {} bytes from {}", bytes, client_addr));
-                bytes
-            }
-            Err(e) => {
-                match e.kind() {
-                    ErrorKind::TimedOut => {
-                        self.logger.log_warning(&format!("Read timeout for client {}", client_addr));
-                        let response = HttpResponse::new(408, "Request Timeout")
-                            .with_content_type("text/plain")
-                            .with_body("Request timed out");
-                        let _ = stream.write(response.format().as_bytes());
-                        return Err(ServerError::TimeoutError);
-                    }
-                    ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => {
-                        self.logger.log_warning(&format!("Connection reset by client {}", client_addr));
-                        return Ok(());
-                    }
-                    _ => {
-                        self.logger.log_error(&format!("Read error from {}: {}", client_addr, e));
-                        return Err(ServerError::IoError(e));
+        // Support multiple requests per connection (HTTP keep-alive)
+        loop {
+            // Read incoming data from TCP stream with proper error handling
+            let mut buffer = [0; 1024];
+            
+            let bytes_read = match stream.read(&mut buffer) {
+                Ok(0) => {
+                    self.logger.log_info(&format!("Client {} closed connection", client_addr));
+                    return Ok(());
+                }
+                Ok(bytes) => {
+                    self.logger.log_info(&format!("Received {} bytes from {}", bytes, client_addr));
+                    bytes
+                }
+                Err(e) => {
+                    match e.kind() {
+                        ErrorKind::TimedOut => {
+                            self.logger.log_warning(&format!("Read timeout for client {}", client_addr));
+                            let response = HttpResponse::new(408, "Request Timeout")
+                                .with_content_type("text/plain")
+                                .with_body("Request timed out");
+                            let _ = stream.write(response.format().as_bytes());
+                            return Err(ServerError::TimeoutError);
+                        }
+                        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => {
+                            self.logger.log_warning(&format!("Connection reset by client {}", client_addr));
+                            return Ok(());
+                        }
+                        ErrorKind::WouldBlock => {
+                            // No data available right now, continue to next iteration
+                            continue;
+                        }
+                        _ => {
+                            self.logger.log_error(&format!("Read error from {}: {}", client_addr, e));
+                            return Err(ServerError::IoError(e));
+                        }
                     }
                 }
-            }
-        };
+            };
 
-        let request_data = String::from_utf8_lossy(&buffer[..bytes_read]);
-        
-        // Handle malformed HTTP requests gracefully
-        let response = match HttpRequest::parse(&request_data) {
-            Ok(request) => {
-                self.logger.log_request(&request.method, &request.path, 200, client_addr);
-                
-                // Use router for request handling
-                let response = self.router.route(&request);
-                self.logger.log_request(&request.method, &request.path, response.status_code, client_addr);
-                response
-            }
-            Err(parse_error) => {
-                // Log errors appropriately
-                self.logger.log_warning(&format!("Malformed request from {}: {}", client_addr, parse_error));
-                self.logger.log_request("INVALID", "N/A", 400, client_addr);
-                
-                HttpResponse::new(400, "Bad Request")
-                    .with_content_type("text/html")
-                    .with_body("<h1>400 - Bad Request</h1><p>The request could not be parsed.</p>")
-            }
-        };
+            let request_data = String::from_utf8_lossy(&buffer[..bytes_read]);
+            
+            // Handle malformed HTTP requests gracefully
+            let (response, should_keep_alive) = match HttpRequest::parse(&request_data) {
+                Ok(request) => {
+                    // Check if client wants to keep connection alive
+                    let connection_header = request.headers.get("connection")
+                        .map(|s| s.to_lowercase())
+                        .unwrap_or_else(|| {
+                            // Default behavior based on HTTP version
+                            if request.version == "HTTP/1.1" {
+                                "keep-alive".to_string()
+                            } else {
+                                "close".to_string()
+                            }
+                        });
+                    
+                    let keep_alive = connection_header.contains("keep-alive");
+                    
+                    self.logger.log_request(&request.method, &request.path, 200, client_addr);
+                    
+                    // Use router for request handling
+                    let mut response = self.router.route(&request);
+                    
+                    // Add connection header to response
+                    if keep_alive {
+                        response = response.with_connection("keep-alive");
+                    } else {
+                        response = response.with_connection("close");
+                    }
+                    
+                    // Check if client accepts chunked encoding
+                    let supports_chunked = request.headers.get("te")
+                        .map(|encoding| encoding.contains("chunked"))
+                        .unwrap_or(true); // Default to supporting chunked for HTTP/1.1
+                    
+                    self.logger.log_request(&request.method, &request.path, response.status_code, client_addr);
+                    (response, keep_alive && supports_chunked)
+                }
+                Err(parse_error) => {
+                    // Log errors appropriately
+                    self.logger.log_warning(&format!("Malformed request from {}: {}", client_addr, parse_error));
+                    self.logger.log_request("INVALID", "N/A", 400, client_addr);
+                    
+                    let response = HttpResponse::new(400, "Bad Request")
+                        .with_content_type("text/html")
+                        .with_connection("close")
+                        .with_body("<h1>400 - Bad Request</h1><p>The request could not be parsed.</p>");
+                    (response, false)
+                }
+            };
 
-        // Send response with error handling
-        match stream.write(response.format().as_bytes()) {
-            Ok(_) => {
-                if let Err(e) = stream.flush() {
-                    self.logger.log_warning(&format!("Failed to flush response to {}: {}", client_addr, e));
+            // Send response with error handling
+            let formatted_response = if should_keep_alive && response.headers.contains_key("Transfer-Encoding") {
+                // Use chunked encoding if explicitly requested
+                response.format_chunked()
+            } else {
+                response.format()
+            };
+
+            match stream.write(formatted_response.as_bytes()) {
+                Ok(_) => {
+                    if let Err(e) = stream.flush() {
+                        self.logger.log_warning(&format!("Failed to flush response to {}: {}", client_addr, e));
+                    }
+                }
+                Err(e) => {
+                    self.logger.log_error(&format!("Failed to send response to {}: {}", client_addr, e));
+                    return Err(ServerError::IoError(e));
                 }
             }
-            Err(e) => {
-                self.logger.log_error(&format!("Failed to send response to {}: {}", client_addr, e));
-                return Err(ServerError::IoError(e));
+
+            // Check if we should close the connection
+            if !should_keep_alive || response.headers.get("Connection").map(|c| c.to_lowercase().contains("close")).unwrap_or(false) {
+                self.logger.log_info(&format!("Closing connection to {}", client_addr));
+                break;
             }
         }
 
@@ -533,6 +843,20 @@ impl HttpServer {
             .with_content_type("application/json")
             .with_body(&format!(r#"{{"method":"{}","path":"{}","body":"{}"}}"#, 
                 request.method, request.path, request.body))
+    }
+
+    fn handle_admin(_request: &HttpRequest) -> HttpResponse {
+        HttpResponse::new(200, "OK")
+            .with_content_type("text/html")
+            .with_body("<h1>🔒 Admin Panel</h1><p>Welcome to the protected admin area!</p><p>You successfully authenticated.</p>")
+    }
+
+    fn handle_chunked_demo(_request: &HttpRequest) -> HttpResponse {
+        let large_content = "This is a demonstration of chunked transfer encoding. ".repeat(20);
+        HttpResponse::new(200, "OK")
+            .with_content_type("text/plain")
+            .with_chunked_encoding()
+            .with_body(&large_content)
     }
 
     // Legacy handlers for backward compatibility (now unused)
