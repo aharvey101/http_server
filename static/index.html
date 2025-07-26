@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rust HTTP Server</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        h1 { color: #d73502; }
+        .code { background: #f4f4f4; padding: 10px; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <h1>🦀 Rust HTTP Server</h1>
+    <p>Welcome to our HTTP server built from scratch in Rust!</p>
+    
+    <h2>Available Routes:</h2>
+    <ul>
+        <li><a href="/hello">GET /hello</a> - Simple greeting</li>
+        <li><a href="/hello?name=Rust">GET /hello?name=Rust</a> - Greeting with query parameter</li>
+        <li><a href="/api/status">GET /api/status</a> - Server status JSON</li>
+        <li><strong>POST /api/echo</strong> - Echo back request data</li>
+    </ul>
+    
+    <h2>Test with curl:</h2>
+    <div class="code">
+        curl -X POST http://127.0.0.1:8080/api/echo -d "Hello from curl!"
+    </div>
+</body>
+</html>
