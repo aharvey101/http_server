@@ -23,4 +23,4 @@ pub use connection_pool::ConnectionPool;
 pub use buffered_stream::BufferedStream;
 pub use server::HttpServer;
 pub use auth::base64_decode;
-pub use config::{ServerConfig, ConfigError};
+pub use config::ServerConfig;

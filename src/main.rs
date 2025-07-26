@@ -1,8 +1,7 @@
-mod lib;
 #[cfg(test)]
 mod tests;
 
-use lib::{HttpServer, ServerConfig};
+use api::{HttpServer, ServerConfig};
 use std::env;
 
 fn main() {

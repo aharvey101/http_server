@@ -1,8 +1,7 @@
 use std::net::{TcpListener, TcpStream};
 use std::io::prelude::*;
-use std::collections::HashMap;
 use std::time::Duration;
-use std::io::{self, ErrorKind};
+use std::io::ErrorKind;
 use std::sync::Arc;
 use super::{
     ServerError, Logger, HttpRequest, HttpResponse, Router, ThreadPool, 
@@ -14,11 +13,13 @@ pub struct HttpServer {
     router: Router,
     logger: Logger,
     thread_pool: ThreadPool,
+    #[allow(dead_code)] // TODO: implement connection pooling
     connection_pool: ConnectionPool,
     config: ServerConfig,
 }
 
 impl HttpServer {
+    #[allow(dead_code)] // Public API method
     pub fn new(address: &str) -> Result<Self, ServerError> {
         let config = ServerConfig::default();
         let listener = TcpListener::bind(address)?;
@@ -74,22 +75,27 @@ impl HttpServer {
         Ok(HttpServer { listener, router, logger, thread_pool, connection_pool, config })
     }
 
+    #[allow(dead_code)] // Public API method
     pub fn add_route(&mut self, method: &str, path: &str, handler: fn(&HttpRequest) -> HttpResponse) {
         self.router.add_route(method, path, handler);
     }
 
+    #[allow(dead_code)] // Public API method
     pub fn set_static_dir(&mut self, dir: &str) {
         self.router.set_static_dir(dir);
     }
 
+    #[allow(dead_code)] // Public API method
     pub fn add_auth_user(&mut self, username: &str, password: &str) {
         self.router.add_auth_user(username, password);
     }
 
+    #[allow(dead_code)] // Public API method
     pub fn add_protected_path(&mut self, path: &str) {
         self.router.add_protected_path(path);
     }
 
+    #[allow(dead_code)] // Public API method
     pub fn get_config(&self) -> &ServerConfig {
         &self.config
     }
@@ -168,130 +174,6 @@ impl HttpServer {
                 }
             }
         }
-        Ok(())
-    }
-
-    // Enhanced connection handling with comprehensive error handling and HTTP keep-alive support
-    fn handle_connection_safe(&self, mut stream: TcpStream, client_addr: &str) -> Result<(), ServerError> {
-        // Support multiple requests per connection (HTTP keep-alive)
-        loop {
-            // Read incoming data from TCP stream with proper error handling
-            let mut buffer = [0; 1024];
-            
-            let bytes_read = match stream.read(&mut buffer) {
-                Ok(0) => {
-                    self.logger.log_info(&format!("Client {} closed connection", client_addr));
-                    return Ok(());
-                }
-                Ok(bytes) => {
-                    self.logger.log_info(&format!("Received {} bytes from {}", bytes, client_addr));
-                    bytes
-                }
-                Err(e) => {
-                    match e.kind() {
-                        ErrorKind::TimedOut => {
-                            self.logger.log_warning(&format!("Read timeout for client {}", client_addr));
-                            let response = HttpResponse::new(408, "Request Timeout")
-                                .with_content_type("text/plain")
-                                .with_body("Request timed out");
-                            let _ = stream.write(response.format().as_bytes());
-                            return Err(ServerError::TimeoutError);
-                        }
-                        ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => {
-                            self.logger.log_warning(&format!("Connection reset by client {}", client_addr));
-                            return Ok(());
-                        }
-                        ErrorKind::WouldBlock => {
-                            // No data available right now, continue to next iteration
-                            continue;
-                        }
-                        _ => {
-                            self.logger.log_error(&format!("Read error from {}: {}", client_addr, e));
-                            return Err(ServerError::IoError(e));
-                        }
-                    }
-                }
-            };
-
-            let request_data = String::from_utf8_lossy(&buffer[..bytes_read]);
-            
-            // Handle malformed HTTP requests gracefully
-            let (response, should_keep_alive) = match HttpRequest::parse(&request_data) {
-                Ok(request) => {
-                    // Check if client wants to keep connection alive
-                    let connection_header = request.headers.get("connection")
-                        .map(|s| s.to_lowercase())
-                        .unwrap_or_else(|| {
-                            // Default behavior based on HTTP version
-                            if request.version == "HTTP/1.1" {
-                                "keep-alive".to_string()
-                            } else {
-                                "close".to_string()
-                            }
-                        });
-                    
-                    let keep_alive = connection_header.contains("keep-alive");
-                    
-                    self.logger.log_request(&request.method, &request.path, 200, client_addr);
-                    
-                    // Use router for request handling
-                    let mut response = self.router.route(&request);
-                    
-                    // Add connection header to response
-                    if keep_alive {
-                        response = response.with_connection("keep-alive");
-                    } else {
-                        response = response.with_connection("close");
-                    }
-                    
-                    // Check if client accepts chunked encoding
-                    let supports_chunked = request.headers.get("te")
-                        .map(|encoding| encoding.contains("chunked"))
-                        .unwrap_or(true); // Default to supporting chunked for HTTP/1.1
-                    
-                    self.logger.log_request(&request.method, &request.path, response.status_code, client_addr);
-                    (response, keep_alive && supports_chunked)
-                }
-                Err(parse_error) => {
-                    // Log errors appropriately
-                    self.logger.log_warning(&format!("Malformed request from {}: {}", client_addr, parse_error));
-                    self.logger.log_request("INVALID", "N/A", 400, client_addr);
-                    
-                    let response = HttpResponse::new(400, "Bad Request")
-                        .with_content_type("text/html")
-                        .with_connection("close")
-                        .with_body("<h1>400 - Bad Request</h1><p>The request could not be parsed.</p>");
-                    (response, false)
-                }
-            };
-
-            // Send response with error handling
-            let formatted_response = if should_keep_alive && response.headers.contains_key("Transfer-Encoding") {
-                // Use chunked encoding if explicitly requested
-                response.format_chunked()
-            } else {
-                response.format()
-            };
-
-            match stream.write(formatted_response.as_bytes()) {
-                Ok(_) => {
-                    if let Err(e) = stream.flush() {
-                        self.logger.log_warning(&format!("Failed to flush response to {}: {}", client_addr, e));
-                    }
-                }
-                Err(e) => {
-                    self.logger.log_error(&format!("Failed to send response to {}: {}", client_addr, e));
-                    return Err(ServerError::IoError(e));
-                }
-            }
-
-            // Check if we should close the connection
-            if !should_keep_alive || response.headers.get("Connection").map(|c| c.to_lowercase().contains("close")).unwrap_or(false) {
-                self.logger.log_info(&format!("Closing connection to {}", client_addr));
-                break;
-            }
-        }
-
         Ok(())
     }
 

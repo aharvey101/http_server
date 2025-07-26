@@ -119,6 +119,7 @@ impl ServerConfig {
         }
     }
 
+    #[allow(dead_code)] // Public API method for config saving
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), ConfigError> {
         let toml_content = self.to_toml();
         fs::write(path, toml_content)
@@ -232,6 +233,7 @@ impl ServerConfig {
         Ok(())
     }
 
+    #[allow(dead_code)] // Used by save_to_file method
     fn to_toml(&self) -> String {
         let mut toml = String::new();
         
@@ -286,6 +288,7 @@ impl ServerConfig {
 #[derive(Debug)]
 pub enum ConfigError {
     FileRead(String),
+    #[allow(dead_code)] // Used by save_to_file method
     FileWrite(String),
     InvalidValue(String),
     UnknownKey(String),

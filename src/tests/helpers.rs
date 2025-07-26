@@ -2,7 +2,7 @@ use std::net::TcpStream;
 use std::io::{Read, Write};
 use std::thread;
 use std::time::Duration;
-use crate::lib::server::HttpServer;
+use api::HttpServer;
 
 /// Start a test server on the specified port
 pub fn start_test_server(port: u16) -> thread::JoinHandle<()> {
