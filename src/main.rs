@@ -1,9 +1,8 @@
-mod http_lib;
-mod server;
+mod lib;
 #[cfg(test)]
 mod tests;
 
-use server::HttpServer;
+use lib::HttpServer;
 
 fn main() {
     let mut server = match HttpServer::new("127.0.0.1:8080") {
