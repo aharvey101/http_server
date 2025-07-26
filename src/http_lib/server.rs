@@ -1,8 +1,7 @@
 use std::net::{TcpListener, TcpStream};
 use std::io::prelude::*;
-use std::collections::HashMap;
 use std::time::Duration;
-use std::io::{self, ErrorKind};
+use std::io::ErrorKind;
 use std::sync::Arc;
 use crate::http_lib::{
     ServerError, Logger, HttpRequest, HttpResponse, Router, ThreadPool, 
@@ -14,6 +13,7 @@ pub struct HttpServer {
     router: Router,
     logger: Logger,
     thread_pool: ThreadPool,
+    #[allow(dead_code)]
     connection_pool: ConnectionPool,
 }
 
@@ -41,6 +41,7 @@ impl HttpServer {
         Ok(HttpServer { listener, router, logger, thread_pool, connection_pool })
     }
 
+    #[allow(dead_code)]
     pub fn add_route(&mut self, method: &str, path: &str, handler: fn(&HttpRequest) -> HttpResponse) {
         self.router.add_route(method, path, handler);
     }
@@ -135,6 +136,7 @@ impl HttpServer {
     }
 
     // Enhanced connection handling with comprehensive error handling and HTTP keep-alive support
+    #[allow(dead_code)]
     fn handle_connection_safe(&self, mut stream: TcpStream, client_addr: &str) -> Result<(), ServerError> {
         // Support multiple requests per connection (HTTP keep-alive)
         loop {
