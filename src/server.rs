@@ -3,6 +3,70 @@ use std::io::prelude::*;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::io::{self, ErrorKind};
+
+// Custom error types for better error handling
+#[derive(Debug)]
+pub enum ServerError {
+    IoError(io::Error),
+    ParseError(String),
+    TimeoutError,
+    ConnectionError(String),
+    FileError(String),
+}
+
+impl From<io::Error> for ServerError {
+    fn from(error: io::Error) -> Self {
+        ServerError::IoError(error)
+    }
+}
+
+// Logger for comprehensive logging
+pub struct Logger {
+    start_time: SystemTime,
+}
+
+impl Logger {
+    pub fn new() -> Self {
+        Logger {
+            start_time: SystemTime::now(),
+        }
+    }
+
+    pub fn log_info(&self, message: &str) {
+        let timestamp = self.get_timestamp();
+        println!("[{}] INFO: {}", timestamp, message);
+    }
+
+    pub fn log_error(&self, message: &str) {
+        let timestamp = self.get_timestamp();
+        eprintln!("[{}] ERROR: {}", timestamp, message);
+    }
+
+    pub fn log_warning(&self, message: &str) {
+        let timestamp = self.get_timestamp();
+        println!("[{}] WARNING: {}", timestamp, message);
+    }
+
+    pub fn log_request(&self, method: &str, path: &str, status: u16, client_addr: &str) {
+        let timestamp = self.get_timestamp();
+        println!("[{}] {} {} - {} {}", timestamp, client_addr, method, path, status);
+    }
+
+    fn get_timestamp(&self) -> String {
+        match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => {
+                let secs = duration.as_secs();
+                let hours = (secs / 3600) % 24;
+                let minutes = (secs / 60) % 60;
+                let seconds = secs % 60;
+                format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+            }
+            Err(_) => "00:00:00".to_string(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct HttpRequest {
@@ -182,7 +246,7 @@ impl Router {
             .with_body("<h1>404 - Page Not Found</h1><p>The requested resource could not be found.</p>")
     }
 
-    // Handle static file serving
+    // Handle static file serving with enhanced error handling
     fn serve_static_file(&self, path: &str) -> Option<HttpResponse> {
         if let Some(static_dir) = &self.static_dir {
             let file_path = if path == "/" {
@@ -190,6 +254,15 @@ impl Router {
             } else {
                 format!("{}{}", static_dir, path)
             };
+
+            // Security check - prevent directory traversal
+            if file_path.contains("..") {
+                return Some(
+                    HttpResponse::new(403, "Forbidden")
+                        .with_content_type("text/html")
+                        .with_body("<h1>403 - Forbidden</h1><p>Directory traversal is not allowed.</p>")
+                );
+            }
 
             if Path::new(&file_path).exists() {
                 match fs::read_to_string(&file_path) {
@@ -201,11 +274,13 @@ impl Router {
                                 .with_body(&content)
                         );
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        // Log the specific file error
+                        eprintln!("File read error for {}: {}", file_path, e);
                         return Some(
                             HttpResponse::new(500, "Internal Server Error")
-                                .with_content_type("text/plain")
-                                .with_body("Error reading file")
+                                .with_content_type("text/html")
+                                .with_body("<h1>500 - Internal Server Error</h1><p>Unable to read the requested file.</p>")
                         );
                     }
                 }
@@ -253,12 +328,14 @@ impl Router {
 pub struct HttpServer {
     listener: TcpListener,
     router: Router,
+    logger: Logger,
 }
 
 impl HttpServer {
-    pub fn new(address: &str) -> Result<Self, std::io::Error> {
+    pub fn new(address: &str) -> Result<Self, ServerError> {
         let listener = TcpListener::bind(address)?;
         let mut router = Router::new();
+        let logger = Logger::new();
         
         // Add some default routes
         router.add_route("GET", "/", Self::handle_home);
@@ -266,7 +343,7 @@ impl HttpServer {
         router.add_route("GET", "/api/status", Self::handle_status);
         router.add_route("POST", "/api/echo", Self::handle_echo);
         
-        Ok(HttpServer { listener, router })
+        Ok(HttpServer { listener, router, logger })
     }
 
     pub fn add_route(&mut self, method: &str, path: &str, handler: fn(&HttpRequest) -> HttpResponse) {
@@ -277,66 +354,137 @@ impl HttpServer {
         self.router.set_static_dir(dir);
     }
 
-    pub fn start(&self) -> Result<(), std::io::Error> {
-        println!("HTTP Server listening on http://{}", self.listener.local_addr()?);
-
-        // Implement basic connection acceptance loop
+    pub fn start(&self) -> Result<(), ServerError> {
+        let addr = self.listener.local_addr()?;
+        self.logger.log_info(&format!("HTTP Server starting on http://{}", addr));
+        
+        // Set read timeout for connections to handle timeout errors
         for stream in self.listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    println!("New connection established!");
-                    self.handle_connection(stream);
+                    // Get client address for logging
+                    let client_addr = stream.peer_addr()
+                        .map(|addr| addr.to_string())
+                        .unwrap_or_else(|_| "unknown".to_string());
+                    
+                    self.logger.log_info(&format!("New connection from {}", client_addr));
+                    
+                    // Add timeout handling for connections
+                    if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(30))) {
+                        self.logger.log_warning(&format!("Failed to set read timeout: {}", e));
+                    }
+                    
+                    // Handle connection with enhanced error handling
+                    if let Err(e) = self.handle_connection_safe(stream, &client_addr) {
+                        self.logger.log_error(&format!("Connection error for {}: {:?}", client_addr, e));
+                    }
                 }
                 Err(e) => {
-                    println!("Error accepting connection: {}", e);
+                    // Implement proper error handling for TCP operations
+                    match e.kind() {
+                        ErrorKind::WouldBlock | ErrorKind::TimedOut => {
+                            self.logger.log_warning(&format!("Connection timeout: {}", e));
+                            continue;
+                        }
+                        ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset => {
+                            self.logger.log_warning(&format!("Connection refused/reset: {}", e));
+                            continue;
+                        }
+                        _ => {
+                            self.logger.log_error(&format!("Error accepting connection: {}", e));
+                            return Err(ServerError::ConnectionError(e.to_string()));
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    fn handle_connection(&self, mut stream: TcpStream) {
-        // Read incoming data from TCP stream
+    // Enhanced connection handling with comprehensive error handling
+    fn handle_connection_safe(&self, mut stream: TcpStream, client_addr: &str) -> Result<(), ServerError> {
+        // Read incoming data from TCP stream with proper error handling
         let mut buffer = [0; 1024];
         
-        match stream.read(&mut buffer) {
-            Ok(bytes_read) => {
-                println!("Received {} bytes", bytes_read);
-                let request_data = String::from_utf8_lossy(&buffer[..bytes_read]);
-                println!("Raw Request:\n{}", request_data);
-                
-                // Parse HTTP request
-                match HttpRequest::parse(&request_data) {
-                    Ok(request) => {
-                        println!("Parsed HTTP Request:");
-                        println!("  Method: {}", request.method);
-                        println!("  Path: {}", request.path);
-                        println!("  Version: {}", request.version);
-                        println!("  Headers: {:?}", request.headers);
-                        println!("  Body: {}", request.body);
-                        
-                        // Use router for request handling
-                        let response = self.router.route(&request);
-                        
-                        let formatted_response = response.format();
-                        stream.write(formatted_response.as_bytes()).unwrap();
-                        stream.flush().unwrap();
-                    }
-                    Err(e) => {
-                        println!("Error parsing HTTP request: {}", e);
-                        let response = HttpResponse::new(400, "Bad Request")
+        let bytes_read = match stream.read(&mut buffer) {
+            Ok(0) => {
+                self.logger.log_warning(&format!("Client {} closed connection immediately", client_addr));
+                return Ok(());
+            }
+            Ok(bytes) => {
+                self.logger.log_info(&format!("Received {} bytes from {}", bytes, client_addr));
+                bytes
+            }
+            Err(e) => {
+                match e.kind() {
+                    ErrorKind::TimedOut => {
+                        self.logger.log_warning(&format!("Read timeout for client {}", client_addr));
+                        let response = HttpResponse::new(408, "Request Timeout")
                             .with_content_type("text/plain")
-                            .with_body("Malformed request");
-                        
-                        let formatted_response = response.format();
-                        stream.write(formatted_response.as_bytes()).unwrap();
-                        stream.flush().unwrap();
+                            .with_body("Request timed out");
+                        let _ = stream.write(response.format().as_bytes());
+                        return Err(ServerError::TimeoutError);
+                    }
+                    ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted => {
+                        self.logger.log_warning(&format!("Connection reset by client {}", client_addr));
+                        return Ok(());
+                    }
+                    _ => {
+                        self.logger.log_error(&format!("Read error from {}: {}", client_addr, e));
+                        return Err(ServerError::IoError(e));
                     }
                 }
             }
-            Err(e) => {
-                println!("Error reading from connection: {}", e);
+        };
+
+        let request_data = String::from_utf8_lossy(&buffer[..bytes_read]);
+        
+        // Handle malformed HTTP requests gracefully
+        let response = match HttpRequest::parse(&request_data) {
+            Ok(request) => {
+                self.logger.log_request(&request.method, &request.path, 200, client_addr);
+                
+                // Use router for request handling
+                let response = self.router.route(&request);
+                self.logger.log_request(&request.method, &request.path, response.status_code, client_addr);
+                response
             }
+            Err(parse_error) => {
+                // Log errors appropriately
+                self.logger.log_warning(&format!("Malformed request from {}: {}", client_addr, parse_error));
+                self.logger.log_request("INVALID", "N/A", 400, client_addr);
+                
+                HttpResponse::new(400, "Bad Request")
+                    .with_content_type("text/html")
+                    .with_body("<h1>400 - Bad Request</h1><p>The request could not be parsed.</p>")
+            }
+        };
+
+        // Send response with error handling
+        match stream.write(response.format().as_bytes()) {
+            Ok(_) => {
+                if let Err(e) = stream.flush() {
+                    self.logger.log_warning(&format!("Failed to flush response to {}: {}", client_addr, e));
+                }
+            }
+            Err(e) => {
+                self.logger.log_error(&format!("Failed to send response to {}: {}", client_addr, e));
+                return Err(ServerError::IoError(e));
+            }
+        }
+
+        Ok(())
+    }
+
+    // Legacy method for backward compatibility
+    fn handle_connection(&self, stream: TcpStream) {
+        // Fallback to safe method
+        let client_addr = stream.peer_addr()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+            
+        if let Err(e) = self.handle_connection_safe(stream, &client_addr) {
+            self.logger.log_error(&format!("Connection handling failed: {:?}", e));
         }
     }
 
