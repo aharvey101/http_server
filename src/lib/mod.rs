@@ -9,6 +9,7 @@ pub mod connection_pool;
 pub mod buffered_stream;
 pub mod server;
 pub mod auth;
+pub mod config;
 
 // Re-export commonly used types
 pub use error::ServerError;
@@ -22,3 +23,4 @@ pub use connection_pool::ConnectionPool;
 pub use buffered_stream::BufferedStream;
 pub use server::HttpServer;
 pub use auth::base64_decode;
+pub use config::{ServerConfig, ConfigError};

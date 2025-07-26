@@ -2,10 +2,16 @@ mod lib;
 #[cfg(test)]
 mod tests;
 
-use lib::HttpServer;
+use lib::{HttpServer, ServerConfig};
+use std::env;
 
 fn main() {
-    let mut server = match HttpServer::new("127.0.0.1:8080") {
+    // Load configuration from file or use defaults
+    let config_path = env::args().nth(1).unwrap_or_else(|| "server.toml".to_string());
+    let config = ServerConfig::load_from_file_or_default(&config_path);
+    
+    // Create server from configuration
+    let server = match HttpServer::from_config(config.clone()) {
         Ok(server) => server,
         Err(e) => {
             eprintln!("Failed to create server: {:?}", e);
@@ -13,25 +19,23 @@ fn main() {
         }
     };
     
-    // Enable static file serving
-    server.set_static_dir("static");
-    
-    // Configure authentication
-    server.add_auth_user("admin", "password123");
-    server.add_auth_user("user", "secret");
-    
-    // Protect the admin path
-    server.add_protected_path("/admin");
-    
-    println!("🚀 HTTP Server with Performance Optimizations:");
-    println!("   - Multi-threading with 4 worker threads");
-    println!("   - Connection pooling (max 20 idle connections)");
-    println!("   - Buffered I/O (8KB buffers)");
-    println!("   - HTTP/1.1 with keep-alive connections");
-    println!("   - Chunked transfer encoding support");
-    println!("   - Basic HTTP authentication");
-    println!("   - Static file serving with directory listings");
-    println!("   - Request/response buffering for better performance");
+    println!("🚀 HTTP Server with Configuration System:");
+    println!("   📄 Config file: {}", config_path);
+    println!("   🌐 Address: {}:{}", config.server.host, config.server.port);
+    println!("   🧵 Worker threads: {}", config.threading.worker_threads);
+    println!("   🔗 Max connections: {}", config.threading.max_concurrent_connections);
+    println!("   💾 Connection pool: {} idle connections", config.connection.max_idle_connections);
+    println!("   📁 Static files: {} ({})", 
+        if config.static_files.enabled { "enabled" } else { "disabled" },
+        config.static_files.directory
+    );
+    println!("   🔐 Authentication: {}", 
+        if config.authentication.enabled { "enabled" } else { "disabled" }
+    );
+    println!("   📝 Logging: {} (level: {})", 
+        if config.logging.enabled { "enabled" } else { "disabled" },
+        config.logging.level
+    );
     println!("");
     println!("📋 Available endpoints:");
     println!("   GET  /               - Home page");
@@ -39,15 +43,25 @@ fn main() {
     println!("   GET  /api/status     - JSON status endpoint");
     println!("   GET  /api/stats      - Performance statistics");
     println!("   POST /api/echo       - Echo request data");
-    println!("   GET  /admin          - Protected admin panel (user: admin, pass: password123)");
+    if config.authentication.enabled {
+        println!("   GET  /admin          - Protected admin panel");
+    }
     println!("   GET  /chunked        - Chunked encoding demo");
-    println!("   GET  /static/        - Static file directory");
+    if config.static_files.enabled {
+        println!("   GET  /static/        - Static file directory");
+    }
     println!("");
     println!("🔧 Test commands:");
-    println!("   curl http://127.0.0.1:8080/");
-    println!("   curl http://127.0.0.1:8080/api/stats");
-    println!("   curl -u admin:password123 http://127.0.0.1:8080/admin");
-    println!("   curl http://127.0.0.1:8080/chunked");
+    println!("   curl http://{}:{}/", config.server.host, config.server.port);
+    println!("   curl http://{}:{}/api/stats", config.server.host, config.server.port);
+    if config.authentication.enabled {
+        if let Some((username, password)) = config.authentication.users.iter().next() {
+            println!("   curl -u {}:{} http://{}:{}/admin", username, password, config.server.host, config.server.port);
+        }
+    }
+    println!("   curl http://{}:{}/chunked", config.server.host, config.server.port);
+    println!("");
+    println!("💡 Usage: {} [config_file.toml]", env::args().next().unwrap_or_else(|| "server".to_string()));
     println!("");
     
     if let Err(e) = server.start() {

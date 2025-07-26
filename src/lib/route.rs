@@ -1,4 +1,4 @@
-use crate::lib::{HttpRequest, HttpResponse};
+use super::{HttpRequest, HttpResponse};
 
 #[derive(Debug, Clone)]
 pub struct Route {

@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::time::Duration;
 use std::io::{self, ErrorKind};
 use std::sync::Arc;
-use crate::lib::{
+use super::{
     ServerError, Logger, HttpRequest, HttpResponse, Router, ThreadPool, 
-    ConnectionPool, BufferedStream
+    ConnectionPool, BufferedStream, ServerConfig
 };
 
 pub struct HttpServer {
@@ -15,19 +15,52 @@ pub struct HttpServer {
     logger: Logger,
     thread_pool: ThreadPool,
     connection_pool: ConnectionPool,
+    config: ServerConfig,
 }
 
 impl HttpServer {
     pub fn new(address: &str) -> Result<Self, ServerError> {
+        let config = ServerConfig::default();
         let listener = TcpListener::bind(address)?;
+        Self::from_config_and_listener(config, listener)
+    }
+
+    pub fn from_config(config: ServerConfig) -> Result<Self, ServerError> {
+        let address = config.get_bind_address();
+        let listener = TcpListener::bind(&address)?;
+        Self::from_config_and_listener(config, listener)
+    }
+
+    fn from_config_and_listener(config: ServerConfig, listener: TcpListener) -> Result<Self, ServerError> {
         let mut router = Router::new();
         let logger = Logger::new();
         
-        // Initialize thread pool with 4 worker threads and max 100 concurrent connections
-        let thread_pool = ThreadPool::new(4, 100);
+        // Initialize thread pool with config values
+        let thread_pool = ThreadPool::new(
+            config.threading.worker_threads, 
+            config.threading.max_concurrent_connections
+        );
         
-        // Initialize connection pool with max 20 idle connections and 30 second timeout
-        let connection_pool = ConnectionPool::new(20, 30);
+        // Initialize connection pool with config values
+        let connection_pool = ConnectionPool::new(
+            config.connection.max_idle_connections, 
+            config.connection.idle_timeout_seconds
+        );
+        
+        // Configure static files
+        if config.static_files.enabled {
+            router.set_static_dir(&config.static_files.directory);
+        }
+        
+        // Configure authentication
+        if config.authentication.enabled {
+            for (username, password) in &config.authentication.users {
+                router.add_auth_user(username, password);
+            }
+            for path in &config.authentication.protected_paths {
+                router.add_protected_path(path);
+            }
+        }
         
         // Add some default routes
         router.add_route("GET", "/", Self::handle_home);
@@ -38,7 +71,7 @@ impl HttpServer {
         router.add_route("GET", "/admin", Self::handle_admin);
         router.add_route("GET", "/chunked", Self::handle_chunked_demo);
         
-        Ok(HttpServer { listener, router, logger, thread_pool, connection_pool })
+        Ok(HttpServer { listener, router, logger, thread_pool, connection_pool, config })
     }
 
     pub fn add_route(&mut self, method: &str, path: &str, handler: fn(&HttpRequest) -> HttpResponse) {
@@ -57,10 +90,14 @@ impl HttpServer {
         self.router.add_protected_path(path);
     }
 
+    pub fn get_config(&self) -> &ServerConfig {
+        &self.config
+    }
+
     pub fn start(&self) -> Result<(), ServerError> {
         let addr = self.listener.local_addr()?;
         self.logger.log_info(&format!("HTTP Server starting on http://{}", addr));
-        self.logger.log_info(&format!("Thread pool initialized with {} workers", 4));
+        self.logger.log_info(&format!("Thread pool initialized with {} workers", self.config.threading.worker_threads));
         self.logger.log_info(&format!("Maximum concurrent connections: {}", self.thread_pool.get_max_connections()));
         
         // Set read timeout for connections to handle timeout errors
@@ -75,8 +112,8 @@ impl HttpServer {
                     self.logger.log_info(&format!("New connection from {} (Active: {})", 
                         client_addr, self.thread_pool.get_active_connections()));
                     
-                    // Add timeout handling for connections
-                    if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(30))) {
+                    // Add timeout handling for connections using config values
+                    if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(self.config.server.read_timeout_seconds))) {
                         self.logger.log_warning(&format!("Failed to set read timeout: {}", e));
                     }
                     

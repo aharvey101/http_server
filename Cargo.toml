@@ -3,4 +3,16 @@ name = "api"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "server"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate_config"
+path = "src/bin/generate_config.rs"
+
+[lib]
+name = "api"
+path = "src/lib/mod.rs"
+
 [dependencies]
