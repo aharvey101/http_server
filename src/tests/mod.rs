@@ -4,3 +4,4 @@ pub mod routing;
 pub mod error_handling;
 pub mod content_serving;
 pub mod advanced_features;
+pub mod performance;
