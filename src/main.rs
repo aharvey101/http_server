@@ -23,16 +23,21 @@ fn main() {
     // Protect the admin path
     server.add_protected_path("/admin");
     
-    println!("🚀 HTTP Server with Advanced Features:");
+    println!("🚀 HTTP Server with Performance Optimizations:");
+    println!("   - Multi-threading with 4 worker threads");
+    println!("   - Connection pooling (max 20 idle connections)");
+    println!("   - Buffered I/O (8KB buffers)");
     println!("   - HTTP/1.1 with keep-alive connections");
     println!("   - Chunked transfer encoding support");
     println!("   - Basic HTTP authentication");
     println!("   - Static file serving with directory listings");
+    println!("   - Request/response buffering for better performance");
     println!("");
     println!("📋 Available endpoints:");
     println!("   GET  /               - Home page");
     println!("   GET  /hello?name=X   - Greeting with query params");
     println!("   GET  /api/status     - JSON status endpoint");
+    println!("   GET  /api/stats      - Performance statistics");
     println!("   POST /api/echo       - Echo request data");
     println!("   GET  /admin          - Protected admin panel (user: admin, pass: password123)");
     println!("   GET  /chunked        - Chunked encoding demo");
@@ -40,6 +45,7 @@ fn main() {
     println!("");
     println!("🔧 Test commands:");
     println!("   curl http://127.0.0.1:8080/");
+    println!("   curl http://127.0.0.1:8080/api/stats");
     println!("   curl -u admin:password123 http://127.0.0.1:8080/admin");
     println!("   curl http://127.0.0.1:8080/chunked");
     println!("");
