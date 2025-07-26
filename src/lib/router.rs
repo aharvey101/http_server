@@ -1,14 +1,31 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use super::{HttpRequest, HttpResponse, Route, base64_decode, verify_password, hash_password, generate_salt};
+use std::sync::{Arc, Mutex};
+use super::{
+    HttpRequest, HttpResponse, Route, base64_decode, verify_password, 
+    hash_password, generate_salt, TokenManager, parse_login_request,
+    create_login_response, create_error_response
+};
 
-#[derive(Clone)]
 pub struct Router {
     routes: Vec<Route>,
     static_dir: Option<String>,
-    auth_users: HashMap<String, String>, // username -> password
+    auth_users: Arc<Mutex<HashMap<String, String>>>, // username -> password_hash
     protected_paths: Vec<String>,
+    token_manager: Arc<TokenManager>,
+}
+
+impl Clone for Router {
+    fn clone(&self) -> Self {
+        Router {
+            routes: self.routes.clone(),
+            static_dir: self.static_dir.clone(),
+            auth_users: Arc::clone(&self.auth_users),
+            protected_paths: self.protected_paths.clone(),
+            token_manager: Arc::clone(&self.token_manager),
+        }
+    }
 }
 
 impl Router {
@@ -16,8 +33,9 @@ impl Router {
         Router {
             routes: Vec::new(),
             static_dir: None,
-            auth_users: HashMap::new(),
+            auth_users: Arc::new(Mutex::new(HashMap::new())),
             protected_paths: Vec::new(),
+            token_manager: Arc::new(TokenManager::new()),
         }
     }
 
@@ -33,25 +51,34 @@ impl Router {
         self.static_dir = Some(dir.to_string());
     }
 
-    pub fn add_auth_user(&mut self, username: &str, password: &str) {
-        self.auth_users.insert(username.to_string(), password.to_string());
+    pub fn add_auth_user(&self, username: &str, password: &str) {
+        if let Ok(mut auth_users) = self.auth_users.lock() {
+            auth_users.insert(username.to_string(), password.to_string());
+        }
     }
 
     // Add a user with automatic password hashing
-    pub fn add_auth_user_with_password(&mut self, username: &str, plain_password: &str) {
+    pub fn add_auth_user_with_password(&self, username: &str, plain_password: &str) {
         let salt = generate_salt();
         let hashed_password = hash_password(plain_password, &salt);
-        self.auth_users.insert(username.to_string(), hashed_password);
+        if let Ok(mut auth_users) = self.auth_users.lock() {
+            auth_users.insert(username.to_string(), hashed_password);
+        }
     }
 
     pub fn add_protected_path(&mut self, path: &str) {
         self.protected_paths.push(path.to_string());
     }
 
-    // Basic HTTP Authentication helper
+    // Authentication helper - supports both Basic Auth and Bearer Token
     fn authenticate(&self, request: &HttpRequest) -> bool {
         if let Some(auth_header) = request.headers.get("authorization") {
-            if auth_header.starts_with("Basic ") {
+            if auth_header.starts_with("Bearer ") {
+                // Token-based authentication
+                let token = &auth_header[7..]; // Skip "Bearer "
+                return self.token_manager.validate_token(token).is_some();
+            } else if auth_header.starts_with("Basic ") {
+                // Basic authentication
                 let encoded = &auth_header[6..]; // Skip "Basic "
                 
                 // Decode base64 credentials (simplified implementation)
@@ -61,9 +88,11 @@ impl Router {
                             let username = &decoded[..colon_pos];
                             let password = &decoded[colon_pos + 1..];
                             
-                            return self.auth_users.get(username)
-                                .map(|stored_hash| verify_password(password, stored_hash))
-                                .unwrap_or(false);
+                            if let Ok(auth_users) = self.auth_users.lock() {
+                                return auth_users.get(username)
+                                    .map(|stored_hash| verify_password(password, stored_hash))
+                                    .unwrap_or(false);
+                            }
                         }
                     }
                 }
@@ -93,6 +122,14 @@ impl Router {
                     .with_header("WWW-Authenticate", "Basic realm=\"Protected Area\"")
                     .with_body("<h1>401 - Unauthorized</h1><p>Authentication required to access this resource.</p>");
             }
+        }
+
+        // Handle authentication endpoints
+        match path_without_query {
+            "/api/register" => return self.handle_register(request),
+            "/api/login" => return self.handle_login(request),
+            "/api/logout" => return self.handle_logout(request),
+            _ => {}
         }
 
         // Handle static file serving first for any path starting with static directory
@@ -310,5 +347,104 @@ impl Router {
         }
         
         params
+    }
+
+    /// Handle user registration endpoint
+    pub fn handle_register(&self, request: &HttpRequest) -> HttpResponse {
+        if request.method != "POST" {
+            return HttpResponse::new(405, "Method Not Allowed")
+                .with_content_type("application/json")
+                .with_body(&create_error_response("Only POST method allowed"));
+        }
+
+        // Parse JSON body
+        if let Some((username, password)) = parse_login_request(&request.body) {
+            // Check if user already exists
+            if let Ok(auth_users) = self.auth_users.lock() {
+                if auth_users.contains_key(&username) {
+                    return HttpResponse::new(409, "Conflict")
+                        .with_content_type("application/json")
+                        .with_body(&create_error_response("Username already exists"));
+                }
+            }
+
+            // Hash the password and store the user
+            let salt = generate_salt();
+            let password_hash = hash_password(&password, &salt);
+            if let Ok(mut auth_users) = self.auth_users.lock() {
+                auth_users.insert(username.clone(), password_hash);
+            }
+
+            // Generate a token for the new user
+            let token = self.token_manager.generate_token(&username);
+            
+            HttpResponse::new(201, "Created")
+                .with_content_type("application/json")
+                .with_body(&create_login_response(&token))
+        } else {
+            HttpResponse::new(400, "Bad Request")
+                .with_content_type("application/json")
+                .with_body(&create_error_response("Invalid JSON format. Expected {\"username\": \"...\", \"password\": \"...\"}"))
+        }
+    }
+
+    /// Handle user login endpoint
+    pub fn handle_login(&self, request: &HttpRequest) -> HttpResponse {
+        if request.method != "POST" {
+            return HttpResponse::new(405, "Method Not Allowed")
+                .with_content_type("application/json")
+                .with_body(&create_error_response("Only POST method allowed"));
+        }
+
+        // Parse JSON body
+        if let Some((username, password)) = parse_login_request(&request.body) {
+            // Verify credentials
+            if let Ok(auth_users) = self.auth_users.lock() {
+                if let Some(stored_hash) = auth_users.get(&username) {
+                    if verify_password(&password, stored_hash) {
+                        // Generate a token for the user
+                        let token = self.token_manager.generate_token(&username);
+                        
+                        return HttpResponse::new(200, "OK")
+                            .with_content_type("application/json")
+                            .with_body(&create_login_response(&token));
+                    }
+                }
+            }
+            
+            HttpResponse::new(401, "Unauthorized")
+                .with_content_type("application/json")
+                .with_body(&create_error_response("Invalid username or password"))
+        } else {
+            HttpResponse::new(400, "Bad Request")
+                .with_content_type("application/json")
+                .with_body(&create_error_response("Invalid JSON format. Expected {\"username\": \"...\", \"password\": \"...\"}"))
+        }
+    }
+
+    /// Handle token logout endpoint
+    pub fn handle_logout(&self, request: &HttpRequest) -> HttpResponse {
+        if request.method != "POST" {
+            return HttpResponse::new(405, "Method Not Allowed")
+                .with_content_type("application/json")
+                .with_body(&create_error_response("Only POST method allowed"));
+        }
+
+        // Extract token from Authorization header
+        if let Some(auth_header) = request.headers.get("authorization") {
+            if auth_header.starts_with("Bearer ") {
+                let token = &auth_header[7..]; // Skip "Bearer "
+                
+                if self.token_manager.revoke_token(token) {
+                    return HttpResponse::new(200, "OK")
+                        .with_content_type("application/json")
+                        .with_body(r#"{"success": true, "message": "Logged out successfully"}"#);
+                }
+            }
+        }
+        
+        HttpResponse::new(400, "Bad Request")
+            .with_content_type("application/json")
+            .with_body(&create_error_response("Invalid or missing token"))
     }
 }

@@ -2,6 +2,114 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Structure to hold user authentication data
+#[derive(Clone, Debug)]
+pub struct AuthUser {
+    pub username: String,
+    pub password_hash: String,
+}
+
+/// Structure to hold session token data
+#[derive(Clone, Debug)]
+pub struct AuthToken {
+    pub token: String,
+    pub username: String,
+    pub expires_at: u64, // Unix timestamp
+}
+
+/// Structure for managing authentication tokens
+pub struct TokenManager {
+    tokens: std::sync::Mutex<std::collections::HashMap<String, AuthToken>>,
+}
+
+impl TokenManager {
+    pub fn new() -> Self {
+        TokenManager {
+            tokens: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Generate a new token for a user
+    pub fn generate_token(&self, username: &str) -> String {
+        let token = generate_token();
+        let expires_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() + 3600; // Token expires in 1 hour
+        
+        let auth_token = AuthToken {
+            token: token.clone(),
+            username: username.to_string(),
+            expires_at,
+        };
+        
+        if let Ok(mut tokens) = self.tokens.lock() {
+            tokens.insert(token.clone(), auth_token);
+        }
+        token
+    }
+
+    /// Validate a token and return the username if valid
+    pub fn validate_token(&self, token: &str) -> Option<String> {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        if let Ok(mut tokens) = self.tokens.lock() {
+            if let Some(auth_token) = tokens.get(token) {
+                if auth_token.expires_at > current_time {
+                    return Some(auth_token.username.clone());
+                } else {
+                    // Token expired, remove it
+                    tokens.remove(token);
+                }
+            }
+        }
+        None
+    }
+
+    /// Revoke a token (logout)
+    pub fn revoke_token(&self, token: &str) -> bool {
+        if let Ok(mut tokens) = self.tokens.lock() {
+            tokens.remove(token).is_some()
+        } else {
+            false
+        }
+    }
+
+    /// Clean up expired tokens
+    pub fn cleanup_expired_tokens(&self) {
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        if let Ok(mut tokens) = self.tokens.lock() {
+            tokens.retain(|_, auth_token| auth_token.expires_at > current_time);
+        }
+    }
+}
+
+/// Generate a random token
+pub fn generate_token() -> String {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    
+    let mut hasher = DefaultHasher::new();
+    time.hash(&mut hasher);
+    
+    // Add some additional entropy
+    for i in 0..16 {
+        (time.wrapping_mul(31).wrapping_add(i)).hash(&mut hasher);
+    }
+    
+    let token_hash = hasher.finish();
+    format!("{:016x}{:016x}", token_hash, time)
+}
+
 // Simple base64 decoder for authentication (simplified implementation)
 pub fn base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -109,6 +217,47 @@ fn hex_decode(hex_str: &str) -> Result<Vec<u8>, &'static str> {
     Ok(result)
 }
 
+/// Simple JSON parsing for login requests (no external dependencies)
+pub fn parse_login_request(json_body: &str) -> Option<(String, String)> {
+    // Very simple JSON parsing - looks for "username" and "password" fields
+    let mut username = None;
+    let mut password = None;
+    
+    // Remove whitespace and braces
+    let cleaned = json_body.trim().trim_start_matches('{').trim_end_matches('}');
+    
+    // Split by commas and parse each field
+    for field in cleaned.split(',') {
+        let field = field.trim();
+        if let Some(colon_pos) = field.find(':') {
+            let key = field[..colon_pos].trim().trim_matches('"');
+            let value = field[colon_pos + 1..].trim().trim_matches('"');
+            
+            match key {
+                "username" => username = Some(value.to_string()),
+                "password" => password = Some(value.to_string()),
+                _ => {}
+            }
+        }
+    }
+    
+    if let (Some(u), Some(p)) = (username, password) {
+        Some((u, p))
+    } else {
+        None
+    }
+}
+
+/// Generate JSON response for successful login
+pub fn create_login_response(token: &str) -> String {
+    format!(r#"{{"success": true, "token": "{}"}}"#, token)
+}
+
+/// Generate JSON response for errors
+pub fn create_error_response(message: &str) -> String {
+    format!(r#"{{"success": false, "error": "{}"}}"#, message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +299,56 @@ mod tests {
         let encoded = hex_encode(original);
         let decoded = hex_decode(&encoded).unwrap();
         assert_eq!(original.to_vec(), decoded);
+    }
+
+    #[test]
+    fn test_token_generation_and_validation() {
+        let token_manager = TokenManager::new();
+        let username = "testuser";
+        
+        // Generate a token
+        let token = token_manager.generate_token(username);
+        assert!(!token.is_empty());
+        
+        // Validate the token
+        let validated_username = token_manager.validate_token(&token);
+        assert_eq!(validated_username, Some(username.to_string()));
+        
+        // Invalid token should return None
+        assert_eq!(token_manager.validate_token("invalid_token"), None);
+    }
+
+    #[test]
+    fn test_token_revocation() {
+        let token_manager = TokenManager::new();
+        let username = "testuser";
+        
+        let token = token_manager.generate_token(username);
+        assert!(token_manager.validate_token(&token).is_some());
+        
+        // Revoke the token
+        assert!(token_manager.revoke_token(&token));
+        assert!(token_manager.validate_token(&token).is_none());
+        
+        // Revoking again should return false
+        assert!(!token_manager.revoke_token(&token));
+    }
+
+    #[test]
+    fn test_json_parsing() {
+        let json = r#"{"username": "testuser", "password": "testpass"}"#;
+        let (username, password) = parse_login_request(json).unwrap();
+        assert_eq!(username, "testuser");
+        assert_eq!(password, "testpass");
+        
+        // Test with different order
+        let json2 = r#"{"password": "pass123", "username": "user123"}"#;
+        let (username2, password2) = parse_login_request(json2).unwrap();
+        assert_eq!(username2, "user123");
+        assert_eq!(password2, "pass123");
+        
+        // Test invalid JSON
+        let invalid_json = r#"{"username": "test"}"#; // missing password
+        assert!(parse_login_request(invalid_json).is_none());
     }
 }
