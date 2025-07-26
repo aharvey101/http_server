@@ -10,7 +10,7 @@ pub fn start_test_server(port: u16) -> thread::JoinHandle<()> {
         let mut server = HttpServer::new(&format!("127.0.0.1:{}", port)).unwrap();
         server.set_static_dir("static");
         // Add authentication for testing
-        server.add_auth_user("testuser", "testpass");
+        server.add_auth_user_with_password("testuser", "testpass");
         server.add_protected_path("/admin");
         server.start().unwrap();
     })

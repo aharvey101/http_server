@@ -163,8 +163,8 @@ mod tests {
             let mut server = HttpServer::new(&format!("127.0.0.1:{}", port)).unwrap();
             server.set_static_dir("static");
             // Add multiple auth users
-            server.add_auth_user("admin", "admin123");
-            server.add_auth_user("user", "user456");
+            server.add_auth_user_with_password("admin", "admin123");
+            server.add_auth_user_with_password("user", "user456");
             server.add_protected_path("/admin");
             server.start().unwrap();
         });

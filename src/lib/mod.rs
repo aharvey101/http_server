@@ -22,5 +22,5 @@ pub use thread_pool::ThreadPool;
 pub use connection_pool::ConnectionPool;
 pub use buffered_stream::BufferedStream;
 pub use server::HttpServer;
-pub use auth::base64_decode;
+pub use auth::{base64_decode, hash_password, verify_password, generate_salt};
 pub use config::ServerConfig;

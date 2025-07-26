@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use super::auth::{hash_password, generate_salt};
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -60,8 +61,17 @@ pub struct LoggingSettings {
 impl Default for ServerConfig {
     fn default() -> Self {
         let mut auth_users = HashMap::new();
-        auth_users.insert("admin".to_string(), "password123".to_string());
-        auth_users.insert("user".to_string(), "secret".to_string());
+        
+        // Create hashed passwords for default users
+        // admin:password123 -> hashed
+        let admin_salt = generate_salt();
+        let admin_hash = hash_password("password123", &admin_salt);
+        auth_users.insert("admin".to_string(), admin_hash);
+        
+        // user:secret -> hashed
+        let user_salt = generate_salt();
+        let user_hash = hash_password("secret", &user_salt);
+        auth_users.insert("user".to_string(), user_hash);
 
         ServerConfig {
             server: ServerSettings {

@@ -90,6 +90,11 @@ impl HttpServer {
         self.router.add_auth_user(username, password);
     }
 
+    #[allow(dead_code)] // Public API method  
+    pub fn add_auth_user_with_password(&mut self, username: &str, plain_password: &str) {
+        self.router.add_auth_user_with_password(username, plain_password);
+    }
+
     #[allow(dead_code)] // Public API method
     pub fn add_protected_path(&mut self, path: &str) {
         self.router.add_protected_path(path);

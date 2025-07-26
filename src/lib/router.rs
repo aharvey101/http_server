@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use super::{HttpRequest, HttpResponse, Route, base64_decode};
+use super::{HttpRequest, HttpResponse, Route, base64_decode, verify_password, hash_password, generate_salt};
 
 #[derive(Clone)]
 pub struct Router {
@@ -37,6 +37,13 @@ impl Router {
         self.auth_users.insert(username.to_string(), password.to_string());
     }
 
+    // Add a user with automatic password hashing
+    pub fn add_auth_user_with_password(&mut self, username: &str, plain_password: &str) {
+        let salt = generate_salt();
+        let hashed_password = hash_password(plain_password, &salt);
+        self.auth_users.insert(username.to_string(), hashed_password);
+    }
+
     pub fn add_protected_path(&mut self, path: &str) {
         self.protected_paths.push(path.to_string());
     }
@@ -55,7 +62,7 @@ impl Router {
                             let password = &decoded[colon_pos + 1..];
                             
                             return self.auth_users.get(username)
-                                .map(|stored_password| stored_password == password)
+                                .map(|stored_hash| verify_password(password, stored_hash))
                                 .unwrap_or(false);
                         }
                     }
