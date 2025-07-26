@@ -1,6 +1,6 @@
 use super::helpers::*;
 use std::thread;
-use crate::server::HttpServer;
+use crate::lib::server::HttpServer;
 
 // =======================
 // STEP 8: ADVANCED FEATURES TESTS

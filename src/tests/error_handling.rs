@@ -97,22 +97,40 @@ mod tests {
         let _server_handle = start_test_server(port);
         wait_for_server(port);
 
-        // Send minimal invalid request that should trigger parse error
+        // Test empty request handling with a much shorter timeout
         let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port)).unwrap();
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        stream.set_write_timeout(Some(Duration::from_millis(500))).unwrap();
         
         // Send truly empty request (no data at all)
         stream.write_all(b"").unwrap();
         
-        let mut response = String::new();
-        let _ = stream.read_to_string(&mut response);
+        // Try to read response with a short timeout
+        let mut buffer = [0; 1024];
+        let result = stream.read(&mut buffer);
         
-        // The server should close the connection for empty requests
-        // We expect either a 400 response or connection to close with empty response
-        if !response.is_empty() {
-            assert!(response.contains("HTTP/1.1 400 Bad Request") || response.contains("400 - Bad Request"));
+        match result {
+            Ok(0) => {
+                // Server closed connection immediately - this is good behavior
+                // for an empty request
+            }
+            Ok(n) => {
+                // Server sent a response - check if it's a proper error response
+                let response = String::from_utf8_lossy(&buffer[..n]);
+                assert!(response.contains("HTTP/1.1 400 Bad Request") || 
+                        response.contains("400 - Bad Request"),
+                        "Expected 400 Bad Request for empty request, got: {}", response);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
+                // Timeout means server is waiting for more data - this is less ideal
+                // but acceptable behavior. We'll allow it but it's not optimal.
+                eprintln!("Warning: Server timed out on empty request rather than closing connection");
+            }
+            Err(_) => {
+                // Other errors like connection reset are also acceptable
+                // as they indicate the server rejected the empty request
+            }
         }
-        // If response is empty, it means the server properly closed the connection for malformed request
     }
 
     #[test]
