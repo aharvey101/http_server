@@ -1,14 +1,11 @@
 # HTTP Server Authentication System
 
-This HTTP server supports both traditional password hashing and modern token-based authentication.
+This HTTP server supports modern token-based authentication with secure password hashing.
 
 ## Authentication Methods
 
-### 1. Basic Authentication (Username/Password)
-Uses HTTP Basic Auth with salted password hashing for traditional authentication.
-
-### 2. Token-Based Authentication (Recommended)
-Users can register/login to receive a JWT-like token for subsequent requests.
+### Token-Based Authentication
+Users can register/login to receive a JWT-like token for subsequent requests. This is the primary and recommended authentication method.
 
 ## Password Hashing
 
@@ -172,7 +169,7 @@ These passwords are automatically hashed when the default configuration is creat
 4. **Hex Encoding**: Salts and hashes are stored as hexadecimal strings
 5. **Token Expiration**: Authentication tokens expire after 1 hour
 6. **Thread Safety**: Both user storage and token management are thread-safe
-7. **Multiple Auth Methods**: Supports both Basic Auth and Bearer Token authentication
+7. **Bearer Token Authentication**: Uses secure token-based authentication only
 
 ## Migration from Plain Text
 
@@ -184,7 +181,7 @@ If you have existing plain text passwords in your configuration, you need to:
 
 ## Example Usage
 
-### Traditional Basic Auth
+### Token-Based Authentication Setup
 ```rust
 use api::HttpServer;
 
