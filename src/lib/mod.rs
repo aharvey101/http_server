@@ -25,6 +25,6 @@ pub use server::HttpServer;
 pub use auth::{
     base64_decode, hash_password, verify_password, generate_salt, generate_token,
     TokenManager, AuthUser, AuthToken, parse_login_request, 
-    create_login_response, create_error_response
+    create_login_response, create_error_response, hex_encode, hex_decode
 };
 pub use config::ServerConfig;
