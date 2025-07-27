@@ -66,6 +66,7 @@ impl HttpServer {
         // Add some default routes
         router.add_route("GET", "/", Self::handle_home);
         router.add_route("GET", "/hello", Self::handle_hello);
+        router.add_route("HEAD", "/hello", Self::handle_hello_head);
         router.add_route("GET", "/api/status", Self::handle_status);
         router.add_route("GET", "/api/stats", Self::handle_stats);
         router.add_route("POST", "/api/echo", Self::handle_echo);
@@ -280,8 +281,8 @@ impl HttpServer {
             };
 
             // Send response with buffered I/O
-            let formatted_response = if should_keep_alive && response.headers.contains_key("Transfer-Encoding") {
-                // Use chunked encoding if explicitly requested
+            let formatted_response = if response.headers.contains_key("Transfer-Encoding") {
+                // Use chunked encoding if Transfer-Encoding header is present
                 response.format_chunked()
             } else {
                 response.format()
@@ -341,6 +342,19 @@ impl HttpServer {
         HttpResponse::new(200, "OK")
             .with_content_type("text/plain")
             .with_body(&format!("Hello, {}!", name))
+    }
+
+    fn handle_hello_head(request: &HttpRequest) -> HttpResponse {
+        let query_params = Router::parse_query_params(&request.path);
+        let default_name = "World".to_string();
+        let name = query_params.get("name").unwrap_or(&default_name);
+        
+        // HEAD response should have same headers as GET but no body
+        let body = format!("Hello, {}!", name);
+        HttpResponse::new(200, "OK")
+            .with_content_type("text/plain")
+            .with_header("Content-Length", &body.len().to_string())
+            // No body for HEAD requests
     }
 
     fn handle_status(_request: &HttpRequest) -> HttpResponse {
