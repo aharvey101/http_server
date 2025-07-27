@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use super::{
-    HttpRequest, HttpResponse, Route, base64_decode, verify_password, 
+    HttpRequest, HttpResponse, Route, verify_password, 
     hash_password, generate_salt, TokenManager, parse_login_request,
     create_login_response, create_error_response
 };
@@ -51,13 +51,14 @@ impl Router {
         self.static_dir = Some(dir.to_string());
     }
 
+    // Add a user with pre-hashed password (used by configuration loading)
     pub fn add_auth_user(&self, username: &str, password: &str) {
         if let Ok(mut auth_users) = self.auth_users.lock() {
             auth_users.insert(username.to_string(), password.to_string());
         }
     }
 
-    // Add a user with automatic password hashing
+    // Add a user with automatic password hashing (preferred for setup/admin use)
     pub fn add_auth_user_with_password(&self, username: &str, plain_password: &str) {
         let salt = generate_salt();
         let hashed_password = hash_password(plain_password, &salt);
@@ -70,32 +71,13 @@ impl Router {
         self.protected_paths.push(path.to_string());
     }
 
-    // Authentication helper - supports both Basic Auth and Bearer Token
+    // Authentication helper - supports Bearer Token only
     fn authenticate(&self, request: &HttpRequest) -> bool {
         if let Some(auth_header) = request.headers.get("authorization") {
             if auth_header.starts_with("Bearer ") {
                 // Token-based authentication
                 let token = &auth_header[7..]; // Skip "Bearer "
                 return self.token_manager.validate_token(token).is_some();
-            } else if auth_header.starts_with("Basic ") {
-                // Basic authentication
-                let encoded = &auth_header[6..]; // Skip "Basic "
-                
-                // Decode base64 credentials (simplified implementation)
-                if let Ok(decoded_bytes) = base64_decode(encoded) {
-                    if let Ok(decoded) = String::from_utf8(decoded_bytes) {
-                        if let Some(colon_pos) = decoded.find(':') {
-                            let username = &decoded[..colon_pos];
-                            let password = &decoded[colon_pos + 1..];
-                            
-                            if let Ok(auth_users) = self.auth_users.lock() {
-                                return auth_users.get(username)
-                                    .map(|stored_hash| verify_password(password, stored_hash))
-                                    .unwrap_or(false);
-                            }
-                        }
-                    }
-                }
             }
         }
         false
@@ -118,9 +100,8 @@ impl Router {
         if self.is_protected_path(path_without_query) {
             if !self.authenticate(request) {
                 return HttpResponse::new(401, "Unauthorized")
-                    .with_content_type("text/html")
-                    .with_header("WWW-Authenticate", "Basic realm=\"Protected Area\"")
-                    .with_body("<h1>401 - Unauthorized</h1><p>Authentication required to access this resource.</p>");
+                    .with_content_type("application/json")
+                    .with_body("{\"error\": \"Unauthorized\", \"message\": \"Valid Bearer token required to access this resource.\"}");
             }
         }
 
